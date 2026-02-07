@@ -12,6 +12,11 @@ on:
         type: string
         default: ""
         required: false
+      build_bypass:
+        description: "Build Bypass (enable module check bypass)"
+        type: boolean
+        default: true
+        required: false
 
 jobs:
   build-custom-kernel:
@@ -30,6 +35,7 @@ jobs:
         echo "Sub Level       : 145"
         echo "Patch Level     : 2025-09"
         echo "KSU Commit      : ${{ inputs.ksu_commit || 'canary' }}"
+        echo "Build Bypass    : ${{ inputs.build_bypass }}"
         echo "========================================"
 
     - name: Free Disk Space
@@ -140,6 +146,23 @@ jobs:
         curl -LSs https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
         echo "CONFIG_BBG=y" >> "${{ env.DEFCONFIG_FRAGMENT }}"
         sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' common/security/Kconfig
+
+    - name: Apply Module Check Bypass
+      if: ${{ inputs.build_bypass }}
+      run: |
+        TARGET_FILE="$KERNEL_ROOT/common/kernel/module/version.c"
+
+        echo "Applying bypass to $TARGET_FILE"
+        sed -i '/bad_version:/{:a;n;/return 0;/{s/return 0;/return 1;/;b};ba}' "$TARGET_FILE"
+
+        # Verify the bypass
+        if grep -A 5 "bad_version:" "$TARGET_FILE" | grep -q "return 1;"; then
+          echo "SUCCESS: Module check bypass verified in $TARGET_FILE"
+        else
+          echo "FAILED: Module check bypass not found in $TARGET_FILE"
+          grep -A 5 "bad_version:" "$TARGET_FILE" || true
+          exit 1
+        fi
 
     - name: Configure Kernel Options
       working-directory: ${{ env.KERNEL_ROOT }}
