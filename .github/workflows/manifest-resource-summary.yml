@@ -1,0 +1,33 @@
+name: Manifest Resource Summary
+
+on:
+  workflow_dispatch:
+
+jobs:
+  manifest-summary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for summary upload)
+        uses: actions/checkout@v4
+
+      - name: Install requirements
+        run: sudo apt-get update && sudo apt-get install -y python3 python3-pip
+
+      - name: Download and summarize manifests
+        run: |
+          python3 .github/scripts/manifest_resource_summary.py
+        # No env needed; script discovers manifests from kernel config files
+
+      - name: Upload summary
+        if: always()
+        run: |
+          cat manifest_resource_summary.md
+        shell: bash
+        continue-on-error: true
+        id: summary
+
+      - name: Add summary to GitHub Actions
+        if: always()
+        run: |
+          echo "## Manifest Resource Summary" >> $GITHUB_STEP_SUMMARY
+          cat manifest_resource_summary.md >> $GITHUB_STEP_SUMMARY

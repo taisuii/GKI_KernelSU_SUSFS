@@ -1,0 +1,37 @@
+name: 'Build Kernel'
+description: 'Builds kernel using legacy build.sh or Bazel (kleaf)'
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      working-directory: ${{ github.workspace }}/kernel
+      run: |
+        set -euo pipefail
+        export CCACHE_DIR="$GITHUB_WORKSPACE/kernel/.ccache"
+        export PATH="/usr/lib/ccache:$PATH"
+        export CC="ccache clang"
+        export CXX="ccache clang++"
+        export CCACHE_MAXSIZE=1G
+        export CCACHE_COMPILERCHECK=content
+        export CCACHE_BASEDIR="$GITHUB_WORKSPACE"
+        export CCACHE_NOHASHDIR=true
+        export CCACHE_IGNOREOPTIONS=--sysroot*
+        export CCACHE_COMPRESSION=true
+        export CCACHE_COMPRESSION_LEVEL=3
+        export CCACHE_DIRECT=true
+        export CCACHE_FILE_CLONE=true
+        export CCACHE_INODE_CACHE=true
+        export CCACHE_UMASK=002
+        export CCACHE_SLOPPINESS="file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale"
+        if ccache --help 2>&1 | grep -q 'depend_mode'; then
+          export CCACHE_DEPEND=true
+        fi
+        echo "✅ ccache environment variables set"
+        ccache -p
+        if [ -f "build/build.sh" ]; then
+          LTO=thin SKIP_MRPROPER=1 SKIP_EXT_MODULES=1 SKIP_CP_KERNEL_HDR=1 GKI_DEFCONFIG_FRAGMENT="$GITHUB_WORKSPACE/wild_gki.fragment" BUILD_CONFIG=common/build.config.gki.aarch64 CC="$CC" CXX="$CXX" build/build.sh
+        else
+          cp "$GITHUB_WORKSPACE/wild_gki.fragment" common/arch/arm64/configs/wild_gki.fragment
+          tools/bazel build --config=release --notrim --defconfig_fragment=//common:arch/arm64/configs/wild_gki.fragment --cache_dir=$GITHUB_WORKSPACE/kernel/.cache/bazel //common:kernel_aarch64
+        fi

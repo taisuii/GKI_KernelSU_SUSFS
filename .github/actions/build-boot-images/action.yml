@@ -1,0 +1,71 @@
+name: 'Build Boot Images'
+description: 'Creates boot artifacts (boot.img, boot-gz.img, boot-lz4.img) and stores them in boot-artifacts/'
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        set -euo pipefail
+
+        mkdir -p bootimgs
+        mkdir -p boot-artifacts
+
+        if [ -f "$GITHUB_WORKSPACE/kernel/out/$ANDROID_VERSION-$KERNEL_VERSION/dist/Image" ]; then
+          cp "$GITHUB_WORKSPACE/kernel/out/$ANDROID_VERSION-$KERNEL_VERSION/dist/Image" "$GITHUB_WORKSPACE/bootimgs/Image"
+          cp "$GITHUB_WORKSPACE/kernel/out/$ANDROID_VERSION-$KERNEL_VERSION/dist/Image.lz4" "$GITHUB_WORKSPACE/bootimgs/Image.lz4"
+        else
+          cp "$GITHUB_WORKSPACE/kernel/bazel-bin/common/kernel_aarch64/Image" "$GITHUB_WORKSPACE/bootimgs/Image"
+          cp "$GITHUB_WORKSPACE/kernel/bazel-bin/common/kernel_aarch64/Image.lz4" "$GITHUB_WORKSPACE/bootimgs/Image.lz4"
+        fi
+
+        gzip -n -k -f -9 "$GITHUB_WORKSPACE/bootimgs/Image" > "$GITHUB_WORKSPACE/bootimgs/Image.gz"
+
+        cd "$GITHUB_WORKSPACE/bootimgs"
+
+        case "$ANDROID_VERSION" in
+          android12)
+            GKI_URL="https://dl.google.com/android/gki/gki-certified-boot-android12-5.10-${OS_PATCH_LEVEL}_r1.zip"
+            FALLBACK_URL="https://dl.google.com/android/gki/gki-certified-boot-android12-5.10-2023-01_r1.zip"
+
+            status="$(curl -sL -w "%{http_code}" "$GKI_URL" -o /dev/null || true)"
+            if [ "$status" = "200" ]; then
+              curl -L -o gki-kernel.zip "$GKI_URL"
+            else
+              curl -L -o gki-kernel.zip "$FALLBACK_URL"
+            fi
+
+            unzip -q gki-kernel.zip
+            rm -f gki-kernel.zip
+
+            if [ -f "./boot-5.10.img" ]; then
+              BOOT_IMG="./boot-5.10.img"
+            else
+              BOOT_IMG="$(ls -1 ./boot-*.img 2>/dev/null | head -n 1 || true)"
+            fi
+
+            if [ -z "${BOOT_IMG:-}" ]; then
+              exit 1
+            fi
+
+            "$UNPACK_BOOTIMG" --boot_img="$PWD/$BOOT_IMG"
+            ;;
+        esac
+
+        for kernel_image in Image Image.gz Image.lz4; do
+          case "$kernel_image" in
+            Image) output_image="boot.img" ;;
+            Image.gz) output_image="boot-gz.img" ;;
+            Image.lz4) output_image="boot-lz4.img" ;;
+          esac
+
+          if [ "$ANDROID_VERSION" = "android12" ]; then
+            "$MKBOOTIMG" --header_version 4 --kernel "$kernel_image" --output "$output_image" --ramdisk out/ramdisk --os_version 12.0.0 --os_patch_level "$OS_PATCH_LEVEL"
+          else
+            "$MKBOOTIMG" --header_version 4 --kernel "$kernel_image" --output "$output_image"
+          fi
+
+          "$AVBTOOL" add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image "$output_image" --algorithm SHA256_RSA2048 --key "$BOOT_SIGN_KEY_PATH"
+          cp "$output_image" "$GITHUB_WORKSPACE/boot-artifacts/${FILE_NAME}-${output_image}"
+        done

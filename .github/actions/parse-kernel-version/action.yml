@@ -1,0 +1,40 @@
+name: 'Parse Kernel Version'
+description: 'Parses input kernel_version into kernel/android/patch parts and exports them'
+inputs:
+  kernel_version:
+    required: true
+    type: string
+outputs:
+  android_version:
+    value: ${{ steps.parse.outputs.android_version }}
+  kernel_version:
+    value: ${{ steps.parse.outputs.kernel_version }}
+  sub_level:
+    value: ${{ steps.parse.outputs.sub_level }}
+  os_patch_level:
+    value: ${{ steps.parse.outputs.os_patch_level }}
+
+runs:
+  using: composite
+  steps:
+    - id: parse
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        INPUT_VERSION="${{ inputs.kernel_version }}"
+        IFS='-' read -r KERNEL_PART ANDROID_PART REST <<< "$INPUT_VERSION"
+        KERNEL_VERSION="${KERNEL_PART%.*}"
+        SUB_LEVEL="${KERNEL_PART##*.}"
+        ANDROID_VERSION="$ANDROID_PART"
+        OS_PATCH_LEVEL="$REST"
+
+        echo "ANDROID_VERSION=$ANDROID_VERSION" >> "$GITHUB_ENV"
+        echo "KERNEL_VERSION=$KERNEL_VERSION" >> "$GITHUB_ENV"
+        echo "SUB_LEVEL=$SUB_LEVEL" >> "$GITHUB_ENV"
+        echo "OS_PATCH_LEVEL=$OS_PATCH_LEVEL" >> "$GITHUB_ENV"
+
+        echo "android_version=$ANDROID_VERSION" >> "$GITHUB_OUTPUT"
+        echo "kernel_version=$KERNEL_VERSION" >> "$GITHUB_OUTPUT"
+        echo "sub_level=$SUB_LEVEL" >> "$GITHUB_OUTPUT"
+        echo "os_patch_level=$OS_PATCH_LEVEL" >> "$GITHUB_OUTPUT"

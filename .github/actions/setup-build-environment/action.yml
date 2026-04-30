@@ -1,0 +1,76 @@
+name: 'Setup Build Environment'
+description: 'Clones dependencies and exports mkbootimg/avbtool paths'
+inputs:
+  patches_commit:
+    required: false
+  anykernel_commit:
+    required: false
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+
+        # Setup ccache for both build.sh and Bazel
+        sudo apt-get update && sudo apt-get install -y ccache
+        export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
+        export CC="ccache gcc"
+        export CXX="ccache g++"
+        echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
+        echo "CC='ccache gcc'" >> "$GITHUB_ENV"
+        echo "CXX='ccache g++'" >> "$GITHUB_ENV"
+        echo "$GITHUB_WORKSPACE/.ccache" > "$GITHUB_PATH"
+
+        # For Bazel (kleaf), set up remote and disk cache if needed
+        echo "BAZEL_CACHE_DIR=$GITHUB_WORKSPACE/.cache/bazel" >> "$GITHUB_ENV"
+        mkdir -p "$GITHUB_WORKSPACE/.cache/bazel"
+
+        mkdir -p "$GITHUB_WORKSPACE/kernel"
+        mkdir -p "$GITHUB_WORKSPACE/git-repo"
+        curl -L https://storage.googleapis.com/git-repo-downloads/repo -o "$GITHUB_WORKSPACE/git-repo/repo"
+        chmod +x "$GITHUB_WORKSPACE/git-repo/repo"
+        echo "$GITHUB_WORKSPACE/git-repo" >> "$GITHUB_PATH"
+
+        if [ -n "${{ inputs.patches_commit }}" ]; then
+          if [ -d "$GITHUB_WORKSPACE/kernel_patches" ]; then rm -rf "$GITHUB_WORKSPACE/kernel_patches"; fi
+          git clone https://github.com/WildKernels/kernel_patches.git "$GITHUB_WORKSPACE/kernel_patches"
+          cd "$GITHUB_WORKSPACE/kernel_patches"
+          git checkout "${{ inputs.patches_commit }}"
+          cd "$GITHUB_WORKSPACE"
+        else
+          git clone https://github.com/WildKernels/kernel_patches.git "$GITHUB_WORKSPACE/kernel_patches"
+        fi
+
+        if [ -n "${{ inputs.anykernel_commit }}" ]; then
+          if [ -d "$GITHUB_WORKSPACE/AnyKernel3" ]; then rm -rf "$GITHUB_WORKSPACE/AnyKernel3"; fi
+          git clone https://github.com/WildKernels/AnyKernel3.git "$GITHUB_WORKSPACE/AnyKernel3"
+          cd "$GITHUB_WORKSPACE/AnyKernel3"
+          git checkout "${{ inputs.anykernel_commit }}"
+          cd "$GITHUB_WORKSPACE"
+        elif [ ! -d "$GITHUB_WORKSPACE/AnyKernel3" ]; then
+          git clone https://github.com/WildKernels/AnyKernel3.git -b gki-2.0 "$GITHUB_WORKSPACE/AnyKernel3"
+        fi
+
+        AOSP_MIRROR=https://android.googlesource.com
+        BRANCH=main-kernel-2025
+        git clone $AOSP_MIRROR/kernel/prebuilts/build-tools -b $BRANCH --depth 1 kernel-build-tools
+        git clone $AOSP_MIRROR/platform/system/tools/mkbootimg -b $BRANCH --depth 1 mkbootimg
+
+        echo "AVBTOOL=$GITHUB_WORKSPACE/kernel-build-tools/linux-x86/bin/avbtool" >> "$GITHUB_ENV"
+        echo "MKBOOTIMG=$GITHUB_WORKSPACE/mkbootimg/mkbootimg.py" >> "$GITHUB_ENV"
+        echo "UNPACK_BOOTIMG=$GITHUB_WORKSPACE/mkbootimg/unpack_bootimg.py" >> "$GITHUB_ENV"
+        echo "BOOT_SIGN_KEY_PATH=$GITHUB_WORKSPACE/kernel-build-tools/linux-x86/share/avb/testkey_rsa2048.pem" >> "$GITHUB_ENV"
+
+        mkdir -p "$GITHUB_WORKSPACE/kernel-build-tools/linux-x86/share/avb"
+        if [ -z "${BOOT_SIGN_KEY:-}" ]; then
+          exit 1
+        fi
+
+        KEY_PATH="$GITHUB_WORKSPACE/kernel-build-tools/linux-x86/share/avb/testkey_rsa2048.pem"
+        printf '%s' "$BOOT_SIGN_KEY" > "$KEY_PATH"
+        if ! head -n 1 "$KEY_PATH" | grep -q 'BEGIN'; then
+          printf '%s' "$BOOT_SIGN_KEY" | base64 -d > "$KEY_PATH"
+        fi
+        chmod 600 "$KEY_PATH"

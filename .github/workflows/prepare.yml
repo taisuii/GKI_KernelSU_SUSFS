@@ -1,0 +1,96 @@
+name: Prepare and Build
+
+on:
+  workflow_call:
+    inputs:
+      config_file:
+        description: "Path to the JSON config file"
+        required: true
+        type: string
+      ksu_commit:
+        description: "KSU Commit"
+        required: false
+        type: string
+      anykernel_commit:
+        description: "AnyKernel3 Commit"
+        required: false
+        type: string
+      patches_commit:
+        description: "Kernel Patches Commit"
+        required: false
+        type: string
+      susfs_commit:
+        description: "SUSFS Commit"
+        required: false
+        type: string
+      feature_set:
+        description: "Feature Set"
+        required: false
+        type: string
+      variant:
+        description: "Build Variant (All, Normal, Bypass, Wild)"
+        required: false
+        type: string
+      use_repo:
+        description: "Use repo for downloading kernel source"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  generate-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.final.outputs.matrix }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v5
+
+      - name: Read Config and Build Final Matrix
+        id: final
+        shell: bash
+        run: |
+          if [ ! -f "${{ inputs.config_file }}" ]; then
+            echo "Error: Config file not found: ${{ inputs.config_file }}"
+            exit 1
+          fi
+
+          CONFIG_JSON=$(cat "${{ inputs.config_file }}" | jq -c .)
+
+          # Build the variant list as a JSON array
+          if [ "${{ inputs.variant }}" = "All" ] || [ -z "${{ inputs.variant }}" ]; then
+            VARIANTS='["Normal","Bypass","Wild"]'
+          else
+            VARIANTS=$(jq -cn --arg v "${{ inputs.variant }}" '[$v]')
+          fi
+
+          # Build { "include": [ {kernel_version:..., variant: ...}, ... ] }
+          FINAL=$(jq -cn \
+            --argjson cfg "$CONFIG_JSON" \
+            --argjson variants "$VARIANTS" '
+            {
+              include: [
+                $cfg.include[] as $item
+                | $variants[] as $variant
+                | $item + {variant: $variant}
+              ]
+            }')
+
+          echo "matrix=$FINAL" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: generate-matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
+    uses: ./.github/workflows/build.yml
+    with:
+      kernel_version: ${{ matrix.kernel_version }}
+      variant: ${{ inputs.variant }}
+      ksu_commit: ${{ inputs.ksu_commit }}
+      anykernel_commit: ${{ inputs.anykernel_commit }}
+      patches_commit: ${{ inputs.patches_commit }}
+      susfs_commit: ${{ inputs.susfs_commit }}
+      feature_set: ${{ inputs.feature_set }}
+      use_repo: ${{ inputs.use_repo }}
+    secrets: inherit

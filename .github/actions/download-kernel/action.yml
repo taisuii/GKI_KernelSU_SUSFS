@@ -1,0 +1,198 @@
+name: 'Download Kernel Repository'
+description: 'Initialize and sync Android kernel source repository'
+
+inputs:
+  android_version:
+    description: 'Android version (e.g., android14)'
+    required: true
+  kernel_version:
+    description: 'Kernel version (e.g., 5.15, 6.1)'
+    required: true
+  os_patch_level:
+    description: 'OS patch level (e.g., 2024-01)'
+    required: true
+  use_repo:
+    description: 'Use repo for downloading kernel source'
+    required: false
+
+outputs:
+  deprecated_branch:
+    description: 'Whether the branch is deprecated'
+    value: ${{ steps.sync.outputs.deprecated }}
+
+runs:
+  using: composite
+  steps:
+    - name: Initialize and Sync Kernel Repository
+      if: ${{ inputs.use_repo == 'true' }}
+      id: sync
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel
+      run: |
+        FORMATTED_BRANCH="${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.os_patch_level }}"
+          repo init -u https://android.googlesource.com/kernel/manifest -b common-${FORMATTED_BRANCH} --depth=1 --partial-clone --clone-filter=blob:limit=10M
+          REMOTE_BRANCH=$(git ls-remote https://android.googlesource.com/kernel/common ${FORMATTED_BRANCH})
+        DEFAULT_MANIFEST_PATH=.repo/manifests/default.xml
+        DEPRECATED=false
+        if grep -q deprecated <<< $REMOTE_BRANCH; then
+          sed -i "s/\"${FORMATTED_BRANCH}\"/\"deprecated\/${FORMATTED_BRANCH}\"/g" $DEFAULT_MANIFEST_PATH
+          echo "⚠ Note: Branch ${FORMATTED_BRANCH} is considered deprecated."
+          DEPRECATED=true
+        fi
+        echo "deprecated=$DEPRECATED" >> $GITHUB_OUTPUT
+        repo sync -c -j$(nproc --all) --fail-fast --no-tags --force-sync --no-clone-bundle
+
+    - name: Download manifest.xml for branch (with deprecated fallback)
+      shell: bash
+      if: ${{ inputs.use_repo != 'true' }}
+      working-directory: ${{ github.workspace }}/kernel
+      run: |
+        set -e
+        FORMATTED_BRANCH="${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.os_patch_level }}"
+        MAIN_MANIFEST_URL="https://android.googlesource.com/kernel/manifest/+/refs/heads/common-${FORMATTED_BRANCH}/default.xml?format=TEXT"
+        DEPRECATED_MANIFEST_URL="https://android.googlesource.com/kernel/manifest/+/refs/heads/deprecated/common-${FORMATTED_BRANCH}/default.xml?format=TEXT"
+        echo "Trying to fetch manifest from $MAIN_MANIFEST_URL"
+        if curl -fsSL "$MAIN_MANIFEST_URL" | base64 -d > manifest.xml; then
+          echo "Fetched manifest from $MAIN_MANIFEST_URL"
+        else
+          echo "Main manifest fetch failed, trying deprecated branch."
+          echo "⚠ Note: Branch common-${FORMATTED_BRANCH} is considered deprecated."
+          if curl -fsSL "$DEPRECATED_MANIFEST_URL" | base64 -d > manifest.xml; then
+            echo "Fetched manifest from $DEPRECATED_MANIFEST_URL"
+          else
+            echo "ERROR: Neither main nor deprecated branch exists for $FORMATTED_BRANCH" >&2
+            exit 22
+          fi
+        fi
+
+    - name: Debug Show manifest.xml
+      shell: bash
+      if: ${{ inputs.use_repo != 'true' }}
+      working-directory: ${{ github.workspace }}/kernel
+      run: cat manifest.xml
+
+    - name: Fast Parallel Archive Download
+      shell: python
+      if: ${{ inputs.use_repo != 'true' }}
+      working-directory: ${{ github.workspace }}/kernel
+      run: |
+        import xml.etree.ElementTree as ET
+        import subprocess
+        import os, glob, shutil
+        from concurrent.futures import ThreadPoolExecutor
+
+        MAX_WORKERS = (os.cpu_count() or 2) * 4
+        NPROC = int(subprocess.check_output("nproc", shell=True).strip())
+
+        import traceback
+        def sync_project(task):
+          name, path, url, strip, rev, linkfiles, copyfiles = task
+          if path not in ["./", "."]:
+            os.makedirs(path, exist_ok=True)
+          print(f"Syncing: {name} -> {path}")
+          print(f"  Download URL: {url}")
+          try:
+
+            import time
+            def try_download(url, name):
+              aria_cmd = f"aria2c -x16 -s16 -k1M -j5 --file-allocation=none -o {name}.tar.gz '{url}'"
+              print(f"  Trying download: {url}")
+              result = subprocess.run(aria_cmd, shell=True)
+              if result.returncode == 0:
+                return True
+              print(f"  Download failed, retrying in 10 seconds...")
+              time.sleep(10)
+              result = subprocess.run(aria_cmd, shell=True)
+              return result.returncode == 0
+
+            downloaded = False
+            # Only apply deprecated fallback for googlesource URLs
+            if "googlesource.com" in url:
+                # Try main branch first
+                downloaded = try_download(url, name)
+                if not downloaded:
+                    # Try deprecated branch
+                    if "+archive/" in url:
+                        parts = url.split("+archive/")
+                        branch = parts[1].split(".tar.gz")[0]
+                        dep_url = f"{parts[0]}+archive/deprecated/{branch}.tar.gz"
+                        print(f"  Main branch failed, trying deprecated branch: {dep_url}")
+                        downloaded = try_download(dep_url, name)
+            else:
+                downloaded = try_download(url, name)
+
+            if not downloaded:
+                print(f"Failed to download {name} from all attempted URLs.")
+                return False
+
+            tar_cmd = f"tar -I 'pigz -p {NPROC} -b 256' -x --record-size=1M -C {path} {strip} -f {name}.tar.gz"
+            subprocess.run(tar_cmd, shell=True, check=True)
+            os.remove(f"{name}.tar.gz")
+            # Handle linkfiles and copyfiles
+            top_dir = os.getcwd()
+            for src_rel, dest_rel in linkfiles:
+                src_path = os.path.join(top_dir, path, src_rel)
+                dest_path = os.path.join(top_dir, dest_rel)
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                if os.path.lexists(dest_path): os.remove(dest_path)
+                rel_target = os.path.relpath(src_path, os.path.dirname(dest_path))
+                os.symlink(rel_target, dest_path)
+                print(f"  [Link] {dest_rel} -> {src_rel}")
+            for src_rel, dest_rel in copyfiles:
+                src_path = os.path.join(top_dir, path, src_rel)
+                dest_path = os.path.join(top_dir, dest_rel)
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                shutil.copy2(src_path, dest_path)
+                print(f"  [Copy] {dest_rel} from {src_rel}")
+            print(f"Synced {name} successfully!")
+            return True
+          except Exception as e:
+            print(f"Failed to sync {name}: {e}")
+            traceback.print_exc()
+            return False
+
+        with open('manifest.xml', 'r') as f:
+          manifest_content = f.read()
+        root = ET.fromstring(manifest_content)
+        # Resolve fetch paths: '..' means 'https://android.googlesource.com'
+        remotes = {}
+        for r in root.findall('remote'):
+          fetch = r.get('fetch').rstrip('/')
+          if fetch == '..':
+            fetch = 'https://android.googlesource.com'
+          remotes[r.get('name')] = fetch
+        default = root.find('default')
+        def_remote = default.get('remote') if default is not None else None
+        def_rev = default.get('revision') if default is not None else None
+
+        sync_tasks = []
+        for project in root.findall('project'):
+          name = project.get('name')
+          path = project.get('path', name)
+          remote_name = project.get('remote', def_remote)
+          rev = project.get('revision', def_rev)
+          base_url = remotes.get(remote_name)
+          if not base_url:
+            continue
+          if "github.com" in base_url:
+            url = f"{base_url}/{name}/archive/{rev}.tar.gz"
+            strip = "--strip-components=1"
+          elif "googlesource.com" in base_url:
+            url = f"{base_url}/{name}/+archive/{rev}.tar.gz"
+            strip = ""
+          elif "git.codelinaro.org" in base_url:
+            url = f"{base_url}/{name}/-/archive/{rev}.tar.gz"
+            strip = "--strip-components=1"
+          else:
+            continue
+          linkfiles = [(lf.get('src'), lf.get('dest')) for lf in project.findall('linkfile')]
+          copyfiles = [(cf.get('src'), cf.get('dest')) for cf in project.findall('copyfile')]
+          sync_tasks.append((name, path, url, strip, rev, linkfiles, copyfiles))
+
+        print(f"Found {len(sync_tasks)} projects to sync.")
+
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            results = list(executor.map(sync_project, sync_tasks))
+        if not all(results):
+            print("One or more projects failed to sync!")
+            exit(1)
